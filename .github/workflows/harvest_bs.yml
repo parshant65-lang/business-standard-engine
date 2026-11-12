@@ -1,0 +1,49 @@
+name: Harvest Business Standard Intelligence
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: bs-cloud-runner
+  cancel-in-progress: false
+
+jobs:
+  harvest-business-standard:
+    name: Business Standard Cloud Vault Harvester
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout Harvester Engine
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Run Business Standard Harvester
+        env:
+          VAULT_PAT: ${{ secrets.VAULT_PAT }}
+        run: |
+          python3 -u harvest_bs_cloud.py
+
+  auto-trigger-next:
+    name: Auto Chain Dispatcher
+    needs: [harvest-business-standard]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Sleep and Re-trigger Next Cycle
+        env:
+          GH_TOKEN: ${{ secrets.VAULT_PAT }}
+        run: |
+          echo "Batch cycle complete. Sleeping 10s and dispatching next batch..."
+          sleep 10
+          gh workflow run harvest_bs.yml --repo parshant65-lang/business-standard-engine || true
