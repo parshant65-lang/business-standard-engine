@@ -23,13 +23,24 @@ MONTHS = [
 ]
 
 VAULT_MAP = [
-    {"name": "business-standard-vault-1", "start": 2015, "end": 2017},
-    {"name": "business-standard-vault-2", "start": 2018, "end": 2020},
+    {"name": "business-standard-vault-1", "start": 2015, "end": 2016},
+    {"name": "business-standard-vault-2", "start": 2016, "end": 2020},
     {"name": "business-standard-vault-3", "start": 2021, "end": 2023},
     {"name": "business-standard-vault-4", "start": 2024, "end": 2026}
 ]
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}
+
+def get_dir_size_mb(path):
+    total = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            fp = os.path.join(root, f)
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total / (1024 * 1024)
 
 def safe_git(cmd, cwd):
     for attempt in range(3):
@@ -92,14 +103,30 @@ def extract_single_article(url):
     return None
 
 def find_active_vault(pat):
+    headers = {"Authorization": f"token {pat}", "Accept": "application/vnd.github.v3+json"}
     # Check vaults in order
     for v_info in VAULT_MAP:
         v_name = v_info["name"]
+        
+        # Fast API pre-check to avoid cloning 500 MB archived repos
+        try:
+            req = urllib.request.Request(f"https://api.github.com/repos/{GITHUB_USER}/{v_name}/contents/checkpoint.json", headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                import base64
+                data = json.loads(resp.read().decode())
+                pre_cp = json.loads(base64.b64decode(data["content"]))
+                if pre_cp.get("rollover_status") == "ARCHIVED_FULL":
+                    print(f"[ARCHIVED] Vault {v_name} is marked ARCHIVED_FULL. Skipping...")
+                    continue
+        except Exception:
+            pass
+
         remote = f"https://x-access-token:{pat}@github.com/{GITHUB_USER}/{v_name}.git"
         temp_dir = f"temp_{v_name}"
         if os.path.exists(temp_dir):
             subprocess.run(["rm", "-rf", temp_dir])
             
+        print(f"[INIT] Cloning {v_name}...")
         safe_git(["git", "clone", "--depth", "1", remote, temp_dir], cwd=".")
         ckpt_file = os.path.join(temp_dir, "checkpoint.json")
         with open(ckpt_file, "r", encoding="utf-8") as f:
@@ -108,6 +135,19 @@ def find_active_vault(pat):
         cur_year = ckpt.get("current_year", v_info["start"])
         end_year = v_info["end"]
         
+        # Check if already archived
+        if ckpt.get("rollover_status") == "ARCHIVED_FULL":
+            print(f"[ARCHIVED] Vault {v_name} is marked ARCHIVED_FULL. Skipping...")
+            subprocess.run(["rm", "-rf", temp_dir])
+            continue
+
+        # Check size threshold (< 450 MB)
+        size_mb = get_dir_size_mb(temp_dir)
+        if size_mb >= 450.0:
+            print(f"[ROLLOVER-ALERT] Vault {v_name} reached {size_mb:.2f} MB! Skipping to next vault...")
+            subprocess.run(["rm", "-rf", temp_dir])
+            continue
+            
         if cur_year <= end_year:
             # Found active vault!
             return v_info, temp_dir, ckpt
